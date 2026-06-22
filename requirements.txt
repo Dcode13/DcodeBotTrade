@@ -1,0 +1,12 @@
+# Bot Trading Otomatis BTCUSD (MT5 + Telegram)
+# Python 3.11+  -- paket MetaTrader5 HANYA jalan di Windows.
+
+MetaTrader5>=5.0.45
+pandas>=2.0
+numpy>=1.24
+python-dotenv>=1.0
+requests>=2.31
+PyYAML>=6.0
+
+# Dev / test (opsional)
+pytest>=8.0

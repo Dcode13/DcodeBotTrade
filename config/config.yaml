@@ -1,0 +1,75 @@
+# ===========================================================================
+# Konfigurasi strategi & risiko - Bot Scalping BTCUSD (M15 -> M5 -> M1)
+# Secret TIDAK di sini. Lihat .env.
+# ===========================================================================
+
+symbol_pattern: "BTC.*USD"   # dipakai untuk auto-discovery nama simbol broker
+magic: 770120                # ID unik bot (hanya menyentuh posisinya sendiri)
+
+# Timeframe stack strategi - BOLEH DIGANTI. TF valid: M1, M5, M15, M30, H1, H4, D1.
+# Urutan WAJIB: trend >= zone >= entry (dari menit). Restart bot setelah ubah.
+#   - trend: penentu bias tren (EMA fast/slow)
+#   - zone : penentu zona swing/pivot
+#   - entry: trigger/eksekusi (momentum candle + ATR untuk SL)
+# Contoh default (scalping cepat): trend M15 -> zone M5  -> entry M1
+# Contoh lebih lambat            : trend H1  -> zone M15 -> entry M5
+timeframes:
+  trend: M15
+  zone: M5
+  entry: M1
+
+strategy:
+  ema_fast: 50               # EMA cepat (M15)
+  ema_slow: 200              # EMA lambat (M15)
+  atr_period: 14             # periode ATR (semua TF)
+  swing_lookback: 60         # jumlah candle M5 untuk cari swing
+  swing_pivot_n: 3           # lebar fractal/pivot (i adalah ekstrem di [i-n, i+n])
+  zone_proximity_atr_m5: 0.6 # jarak maksimum harga ke zona (x ATR M5)
+  min_body_ratio: 0.5        # rasio body/range minimum candle trigger M1
+  rsi_period: 14
+  rsi_filter: true           # aktifkan filter RSI di trigger M1
+  rsi_overbought: 75         # tolak BUY jika RSI > nilai ini
+  rsi_oversold: 25           # tolak SELL jika RSI < nilai ini
+  sl_buffer_atr_m1: 0.5      # buffer SL di luar ekstrem (x ATR M1)
+  rr_ratio: 1.5              # risk:reward (TP = entry +/- RR x jarak SL)
+  sl_min_atr_m1: 0.5         # clamp jarak SL minimum (x ATR M1)
+  sl_max_atr_m1: 3.0         # clamp jarak SL maksimum (x ATR M1)
+
+risk:
+  # Mode sizing: "fixed" = pakai lot tetap (fixed_lot); "risk" = hitung dari risk_per_trade.
+  position_sizing_mode: fixed
+  fixed_lot: 0.1             # lot tetap saat mode "fixed" (akun cent Juno BTCUSD.c)
+  risk_per_trade: 0.01       # 1% per trade (dipakai bila mode "risk"). JANGAN 0.2-0.3.
+  risk_warn_threshold: 0.05  # > nilai ini -> WARNING wajib tampil
+  max_daily_loss_pct: 0.05   # DD harian >= 5% -> stop entry sampai hari berganti
+  max_consecutive_losses: 3  # loss beruntun -> pause, butuh /resume
+  max_open_positions: 1      # tanpa stacking/averaging
+  max_trades_per_day: 8      # batas overtrading
+  max_spread_points: 1500    # BTCUSD.c Juno spread normal ~1019 pts (≈$10).
+                             # 1500 beri sedikit ruang; blokir saat spread melonjak.
+                             # Pantau /status & log -> sesuaikan dgn spread khasmu.
+  allow_min_lot_override: false  # true = boleh entry walau lot min > target risiko
+  deviation: 50              # slippage tolerance saat order
+
+management:
+  break_even: true           # geser SL ke entry setelah profit cukup
+  break_even_trigger_r: 1.0  # trigger break-even pada R ini
+  trailing_stop: false       # trailing berbasis ATR(M1)
+  trailing_atr_mult: 1.5     # jarak trailing (x ATR M1) bila diaktifkan
+
+fundamentals:
+  enabled: true
+  no_trade_window_minutes: 30  # blackout sebelum & sesudah event high-impact
+  fail_mode: skip              # skip | continue  (perilaku saat API gagal)
+  fear_greed_filter: false     # opsional: kecilkan/skip saat sentimen ekstrem
+  fear_greed_min: 10
+  fear_greed_max: 90
+  # Endpoint kalender ekonomi (JSON). Kosongkan untuk menonaktifkan kalender.
+  calendar_url: ""
+  fear_greed_url: "https://api.alternative.me/fng/?limit=1"
+  http_timeout_sec: 10
+
+loop:
+  loop_sleep_sec: 3          # jeda loop utama
+  candles: 300               # jumlah candle yang ditarik per TF
+  heartbeat_minutes: 60      # interval heartbeat ke log/Telegram

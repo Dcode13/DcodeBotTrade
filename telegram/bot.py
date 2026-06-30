@@ -62,6 +62,28 @@ class TelegramBot:
             self._dispatch(text.strip())
 
     # ------------------------------------------------------------------ #
+    def register_commands(self, commands: list[tuple[str, str]]) -> bool:
+        """Daftarkan menu perintah ke Telegram (setMyCommands).
+
+        Setelah ini, mengetik '/' di chat akan memunculkan daftar semua
+        perintah beserta deskripsinya. ``commands`` = [(nama, deskripsi), ...].
+        """
+        if not self.enabled:
+            return False
+        url = API_BASE.format(token=self.token, method="setMyCommands")
+        payload = {"commands": [{"command": c, "description": d} for c, d in commands]}
+        try:
+            resp = requests.post(url, json=payload, timeout=self.timeout)
+            if resp.status_code != 200:
+                log.error("setMyCommands gagal %s: %s", resp.status_code, resp.text[:200])
+                return False
+            log.info("Menu perintah Telegram terdaftar (%d perintah).", len(commands))
+            return True
+        except requests.RequestException as exc:
+            log.error("setMyCommands error: %s", exc)
+            return False
+
+    # ------------------------------------------------------------------ #
     def _get_updates(self) -> list[dict]:
         url = API_BASE.format(token=self.token, method="getUpdates")
         params: dict[str, object] = {"timeout": 0}
@@ -81,9 +103,15 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ #
     def _dispatch(self, text: str) -> None:
-        parts = text.split()
-        cmd = parts[0].lstrip("/").split("@")[0].lower()
-        args = parts[1:]
+        if text.startswith("/"):
+            parts = text.split()
+            cmd = parts[0].lstrip("/").split("@")[0].lower()
+            args = parts[1:]
+        else:
+            # Pesan non-perintah (mis. input untuk langkah /login) diteruskan
+            # utuh sebagai satu argumen lewat command sentinel "__text__".
+            cmd = "__text__"
+            args = [text]
         try:
             reply = self.handler(cmd, args)
         except Exception as exc:  # noqa: BLE001 - jangan biarkan perintah crash loop

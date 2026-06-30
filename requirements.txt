@@ -1,4 +1,4 @@
-# Bot Trading Otomatis BTCUSD (MT5 + Telegram)
+# Bot Trading Otomatis XAUUSD (acuan LBMA + CRT) - MT5 + Telegram
 # Python 3.11+  -- paket MetaTrader5 HANYA jalan di Windows.
 
 MetaTrader5>=5.0.45
@@ -7,6 +7,7 @@ numpy>=1.24
 python-dotenv>=1.0
 requests>=2.31
 PyYAML>=6.0
+openpyxl>=3.1            # ekspor Excel untuk lbma_gold_scraper.py
 
 # Dev / test (opsional)
 pytest>=8.0

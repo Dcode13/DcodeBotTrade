@@ -1,73 +1,268 @@
 # ===========================================================================
-# Konfigurasi strategi & risiko - Bot Scalping BTCUSD (M15 -> M5 -> M1)
+# Konfigurasi strategi & risiko - Bot Trading XAUUSD (Gold)
+# Strategi utama: acuan LBMA AM/PM + konfirmasi teknikal CRT.
 # Secret TIDAK di sini. Lihat .env.
 # ===========================================================================
 
-symbol_pattern: "BTC.*USD"   # dipakai untuk auto-discovery nama simbol broker
+symbol_pattern: "XAU.*USD"   # auto-discovery nama simbol emas broker (mis. XAUUSD)
 magic: 770120                # ID unik bot (hanya menyentuh posisinya sendiri)
 
-# Timeframe stack strategi - BOLEH DIGANTI. TF valid: M1, M5, M15, M30, H1, H4, D1.
-# Urutan WAJIB: trend >= zone >= entry (dari menit). Restart bot setelah ubah.
-#   - trend: penentu bias tren (EMA fast/slow)
-#   - zone : penentu zona swing/pivot
-#   - entry: trigger/eksekusi (momentum candle + ATR untuk SL)
-# Contoh default (scalping cepat): trend M15 -> zone M5  -> entry M1
-# Contoh lebih lambat            : trend H1  -> zone M15 -> entry M5
+# Mode strategi:
+#   combo  = UTAMA emas. Entry momentum (strategi cent EMA/swing/RSI) + jalur LBMA
+#            touch + CRT/Fib. LBMA & Fibonacci jadi ACUAN (tidak wajib utk entry).
+#   lbma   = HANYA jalur LBMA touch + CRT/Fib (butuh data LBMA).
+#   legacy = EMA/swing/RSI murni (tanpa LBMA/CRT/Fib).
+strategy_mode: combo
+
+# Akun STP biasa (BUKAN cent) -> balance/equity sudah dalam unit mata uang riil.
+# Set true HANYA bila kembali ke akun cent (angka dalam sen).
+cent_account: false
+
+# Timeframe stack strategi momentum. ENTRY DI M5 (candle 5 menit):
+#   trend M15 (bias EMA), zone M5 (swing), entry M5 (momentum candle + ATR SL).
+# Evaluasi entry terjadi sekali per candle M5 (lebih selektif, bukan tiap menit).
+# CRT (H1 MSS + M15 CHoCH) & Fibonacci menarik TF-nya sendiri (H1/M15) otomatis.
+# Urutan WAJIB: trend >= zone >= entry.
 timeframes:
   trend: M15
   zone: M5
-  entry: M1
+  entry: M5
 
+# --- Strategi acuan LBMA (emas) ---------------------------------------------
+# Aturan:
+#  1  harga XAUUSD vs level acuan LBMA -> fade ke level (di bawah=SELL, di atas=BUY)
+#  1a AM > PM -> level acuan = PM
+#  1b PM > AM -> level acuan = AM (SL 50 pips)
+#  2  LBMA 2 hari sebelumnya berdekatan (<= ~300 pips) -> konsolidasi -> skip
+# Satuan pip emas: 1 pip = 0.1 (= $0.10). sl_pips 50 -> SL $5.0; proximity 300 -> $30.
+lbma:
+  enabled: true
+  enable_touch_entry: true  # JALUR A: entry fade saat harga menyentuh level LBMA
+  pip_size: 0.1
+  sl_pips: 30              # SL entry (aturan 1b) - DIPERSEMPIT (30p = $3.0) -> SL kecil
+  rr_ratio: 1.2           # TP = entry +/- RR x jarak SL (DIPERSEMPIT -> TP kecil, cepat kena)
+  proximity_pips: 300     # aturan 2: ambang konsolidasi (pips)
+  proximity_days: 2       # aturan 2: jumlah hari LBMA sebelum acuan
+  entry_tolerance_pips: 20  # toleransi "menyentuh" level (pips)
+  history_months: 6       # riwayat LBMA yang di-cache (untuk /LBMA & acuan)
+  use_latest_when_missing: true  # pakai LBMA terbaru bila hari ini belum rilis
+
+# --- Analisis FUNDAMENTAL-TEKNIKAL LBMA (spreadsheet 'HARGA LBMA HARIAN') -----
+# AM = pembukaan sesi London, PM = penutupan. Modul menurunkan:
+#   - metrik harian: DELTA (PM-AM), %, STATUS (NAIK/TURUN), RASIO (PM/AM),
+#     grid akumulasi (AM - 150/300/400).
+#   - level Fibonacci AM & PM (high->low) dari jendela fib_window_days hari.
+#   - BIAS multi-hari (tabel interpretasi):
+#       PM>AM beruntun >= bullish_streak_days  -> bias bullish (+ higher-high = akumulasi)
+#       PM<AM beruntun >= bearish_streak_days  -> tekanan jual sesi London
+# Default require_confirmation=false -> hanya KONTEKS (tampil di alert/status &
+# /lbma_fund), TIDAK memblok entry. Set true bila ingin bias ini ikut menyaring.
+lbma_fund:
+  enabled: true
+  require_confirmation: false   # true = sinyal lawan bias fundamental dibuang
+  fib_window_days: 22           # jendela hari utk high/low fib, rata-rata, median
+  recent_days: 10               # baris tabel harian yang ditampilkan di /lbma_fund
+  bullish_streak_days: 3        # PM>AM beruntun >= ini -> bias bullish
+  bearish_streak_days: 3        # PM<AM beruntun >= ini -> bias bearish
+  grid_offsets: [150, 300, 400]  # AM - tiap offset = level akumulasi/average-down
+
+# --- Analitik Fibonacci + entry "market bagus" (JALUR B) --------------------
+# Saat harga retrace ke golden zone (0.5-0.786) searah bias CRT + ada CHoCH
+# konfirmasi -> entry searah tren (buy dip / sell rally). SL pakai lbma.sl_pips.
+fib:
+  enabled: true
+  pivot_n: 3              # lebar fractal deteksi swing leg
+  lookback: 120          # jumlah candle untuk cari leg swing
+  gz_start: 0.50         # awal golden zone
+  gz_end: 0.786          # akhir golden zone
+  proximity_pips: 30     # jarak dianggap "di level fib" (pips)
+
+# --- Konfirmasi teknikal CRT (port EA GridScalper_CRT) ----------------------
+crt:
+  enabled: true
+  require_confirmation: false  # false = CRT hanya konteks/laporan (jalur LBMA); true = bisa blok
+  enable_trend_entry: true     # JALUR B: entry CRT+Fib trend continuation (market bagus)
+  swing_h1: 5
+  body_ratio_h1: 0.60
+  h1_scan_bars: 150
+  gz_start: 0.50          # golden zone (retracement)
+  gz_end: 0.786
+  require_ob_fvg: false
+  fvg_min_points: 30
+  swing_m15: 3
+  m15_scan_bars: 80
+  l3_strict: false
+  body_ratio_m15: 0.60
+
+# --- Support/Resistance multi-timeframe (JALUR PRIORITAS combo) -------------
+# Deteksi zona S/R dari swing M5/M15/H1 (digabung = confluence). Entry di M5:
+#   harga di SUPPORT + candle M5 bullish  -> BUY
+#   harga di RESISTANCE + candle M5 bearish -> SELL
+sr:
+  enabled: true
+  pivot_n: 3
+  lookback: 150
+  cluster_pips: 40       # gabungkan level berjarak <= ini jadi 1 zona ($4)
+  touch_pips: 30         # toleransi "harga di zona" ($3)
+  sl_buffer_pips: 15     # SL di luar zona ($1.5) - DIPERSEMPIT -> SL kecil
+  rr_ratio: 1.2          # TP kecil (1.2x SL) -> cepat tercapai, win-rate naik
+  min_strength: 3        # NAIK dari 2 -> hanya zona kuat (akurasi lebih tinggi)
+  require_m5_candle: true
+  min_body_ratio: 0.2
+
+# --- Filter REZIM pasar (ANTI-SIDEWAYS) -------------------------------------
+# Gerbang utama SEBELUM semua jalur entry. Menganalisis H1/M15/M5/M3:
+#   - ADX setiap TF wajib >= adx_min  -> tren cukup kuat (bukan ranging), dan
+#   - bias EMA + arah +DI/-DI semua TF sepakat -> arah tren jelas.
+# Bila pasar sideways / arah tak sepakat -> SEMUA entry diblok.
+# Bila trending -> hanya sinyal SEARAH tren yang dieksekusi (lawan arah dibuang).
+regime:
+  enabled: true
+  timeframes: [H1, M15, M5, M3]
+  adx_period: 14
+  adx_min: 25              # NAIK dari 20 -> hanya tren kuat (entry lebih akurat, lebih jarang)
+  require_all_aligned: true  # true = semua TF wajib searah; false = mayoritas tanpa lawan
+  di_confirms_direction: true  # +DI/-DI wajib searah bias EMA tiap TF
+
+# --- Entry alignment multi-timeframe (JALUR combo) --------------------------
+# Kalau bias H1 + M15 + M5 SEPAKAT (buy/sell) dan ada candle momentum di M1 ->
+# langsung entry searah tren, tanpa perlu LBMA & tanpa menunggu zona swing.
+# Catatan: filter 'regime' di atas sudah memaksa keselarasan arah + tren kuat,
+# jadi jalur ini hanya menembak saat tren sudah terkonfirmasi.
+mtf:
+  enabled: true
+  # mode arah: "all" (H1+M15+M5 wajib searah, ketat) | "majority" (>=2 searah & H1 tak lawan)
+  #            | "h1" (ikut bias H1 saja, PALING AGRESIF).
+  mode: majority
+
+# --- Parameter momentum (dipakai jalur MTF & momentum, juga mode legacy) -----
 strategy:
-  ema_fast: 50               # EMA cepat (M15)
-  ema_slow: 200              # EMA lambat (M15)
-  atr_period: 14             # periode ATR (semua TF)
-  swing_lookback: 60         # jumlah candle M5 untuk cari swing
-  swing_pivot_n: 3           # lebar fractal/pivot (i adalah ekstrem di [i-n, i+n])
-  zone_proximity_atr_m5: 0.6 # jarak maksimum harga ke zona (x ATR M5)
-  min_body_ratio: 0.5        # rasio body/range minimum candle trigger M1
+  ema_fast: 50
+  ema_slow: 200
+  atr_period: 14
+  swing_lookback: 60
+  swing_pivot_n: 3
+  zone_proximity_atr_m5: 0.6
+  min_body_ratio: 0.3        # NAIK dari 0.2 -> butuh candle momentum lebih meyakinkan (akurasi)
   rsi_period: 14
-  rsi_filter: true           # aktifkan filter RSI di trigger M1
-  rsi_overbought: 75         # tolak BUY jika RSI > nilai ini
-  rsi_oversold: 25           # tolak SELL jika RSI < nilai ini
-  sl_buffer_atr_m1: 0.5      # buffer SL di luar ekstrem (x ATR M1)
-  rr_ratio: 1.5              # risk:reward (TP = entry +/- RR x jarak SL)
-  sl_min_atr_m1: 0.5         # clamp jarak SL minimum (x ATR M1)
-  sl_max_atr_m1: 3.0         # clamp jarak SL maksimum (x ATR M1)
+  rsi_filter: false          # DIMATIKAN -> entry tidak diblok RSI overbought/oversold
+  rsi_overbought: 75
+  rsi_oversold: 25
+  sl_buffer_atr_m1: 0.3      # buffer SL di luar ekstrem candle (x ATR entry M5) - dipersempit
+  rr_ratio: 1.0              # TP = 1.0 x jarak SL -> TP kecil, peluang tercapai tinggi
+  sl_min_atr_m1: 0.4         # lantai jarak SL (x ATR) - jangan terlalu rapat (kena spread/noise)
+  sl_max_atr_m1: 1.0         # PLAFON jarak SL (x ATR M5) - DIPERSEMPIT 1.5 -> 1.0 -> SL kecil
 
 risk:
   # Mode sizing: "fixed" = pakai lot tetap (fixed_lot); "risk" = hitung dari risk_per_trade.
-  position_sizing_mode: fixed
-  fixed_lot: 0.1             # lot tetap saat mode "fixed" (akun cent Juno BTCUSD.c)
-  risk_per_trade: 0.01       # 1% per trade (dipakai bila mode "risk"). JANGAN 0.2-0.3.
+  # Akun kecil ($16) + SL emas $5: pakai "risk" agar lot otomatis mengecil.
+  position_sizing_mode: risk
+  fixed_lot: 0.01            # lot tetap saat mode "fixed"
+  risk_per_trade: 0.02       # 2% per trade. Pada $16 -> risiko ~$0.32/trade.
   risk_warn_threshold: 0.05  # > nilai ini -> WARNING wajib tampil
-  max_daily_loss_pct: 0.05   # DD harian >= 5% -> stop entry sampai hari berganti
-  max_consecutive_losses: 3  # loss beruntun -> pause, butuh /resume
-  max_open_positions: 1      # tanpa stacking/averaging
-  max_trades_per_day: 8      # batas overtrading
-  max_spread_points: 1500    # BTCUSD.c Juno spread normal ~1019 pts (≈$10).
-                             # 1500 beri sedikit ruang; blokir saat spread melonjak.
-                             # Pantau /status & log -> sesuaikan dgn spread khasmu.
-  allow_min_lot_override: false  # true = boleh entry walau lot min > target risiko
+  max_daily_loss_pct: 1.00   # DD harian >= 100% -> stop entry sampai hari berganti
+  max_consecutive_losses: 4  # NAIK dari 3 -> 2 entry/sinyal bisa hasilkan 2 loss sekaligus
+  max_open_positions: 2      # 2 posisi (entry sekaligus per sinyal)
+  entries_per_signal: 2      # BUKA 2 POSISI SEKALIGUS tiap sinyal valid (TP beda via entry_tp_rrs)
+  max_trades_per_day: 50     # batas overtrading
+  max_spread_points: 50      # XAUUSD spread normal ~15-40 pts. Sesuaikan via /status.
+  # Modal $16 + lot min 0.01 emas (=$1/$1 move) sering > target risiko -> bot SKIP.
+  # true = boleh entry pakai lot minimum walau melebihi target (PAHAMI risikonya).
+  allow_min_lot_override: true
   deviation: 50              # slippage tolerance saat order
 
 management:
-  break_even: true           # geser SL ke entry setelah profit cukup
-  break_even_trigger_r: 1.0  # trigger break-even pada R ini
-  trailing_stop: false       # trailing berbasis ATR(M1)
-  trailing_atr_mult: 1.5     # jarak trailing (x ATR M1) bila diaktifkan
+  break_even: true           # aktifkan auto-SL ke profit
+  break_even_trigger_r: 0.5  # TURUN dari 0.8 -> lock profit lebih cepat (lindungi win-rate)
+  breakeven_plus_pips: 10    # SL PLUS: kunci profit 10 pips ($1) saat trigger (0 = breakeven murni)
+  trailing_stop: true        # SL otomatis ikut harga (ATR) -> profit terkunci makin besar
+  trailing_atr_mult: 1.5     # jarak trailing (x ATR entry TF)
+  auto_tp: true              # TP otomatis (RR) selalu dipasang saat order
+  # RR TP per entry saat entries_per_signal > 1. Entry-1 TP rapat (cepat WIN ->
+  # akurasi naik), entry-2 sedikit lebih jauh (biarkan profit jalan). Tambah
+  # elemen utk >2 entry; bila kurang dari jumlah entry, entry sisa pakai nilai terakhir.
+  entry_tp_rrs: [1.0, 1.5]
 
 fundamentals:
   enabled: true
-  no_trade_window_minutes: 30  # blackout sebelum & sesudah event high-impact
-  fail_mode: skip              # skip | continue  (perilaku saat API gagal)
-  fear_greed_filter: false     # opsional: kecilkan/skip saat sentimen ekstrem
+  no_trade_window_minutes: 30  # blackout sebelum & sesudah event high-impact USD
+  fail_mode: continue          # skip | continue  (perilaku saat API gagal)
+  fear_greed_filter: false     # F&G index kripto - tidak relevan utk emas
   fear_greed_min: 10
   fear_greed_max: 90
-  # Endpoint kalender ekonomi (JSON). Kosongkan untuk menonaktifkan kalender.
-  calendar_url: ""
+  # Kalender ekonomi (JSON Forex Factory minggu ini). Event high-impact USD
+  # (FOMC/CPI/NFP/PCE) -> blackout entry +/- no_trade_window_minutes. Sangat
+  # penting utk emas yang sensitif berita USD. Kosongkan untuk menonaktifkan.
+  calendar_url: "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+  calendar_cache_minutes: 15   # cache hasil kalender (hindari fetch tiap loop 3 dtk)
   fear_greed_url: "https://api.alternative.me/fng/?limit=1"
   http_timeout_sec: 10
+
+# --- BARBAR: Gold M1 Hedged-Martingale Grid --------------------------------
+# Mode agresif dari prompt "Gold M1 Hedged-Martingale Grid".
+# Aktifkan runtime via Telegram: /barbar on. Matikan: /barbar off.
+# Semua jarak memakai satuan harga XAUUSD ($), bukan point/pip.
+barbar:
+  enabled: false
+  timeframe: M1
+  entry_mode: STRADDLE          # STRADDLE | MARKET
+  straddle_distance: 0.50       # BUY STOP ask+0.50, SELL STOP bid-0.50
+  base_lot: 0.01
+  lot_multiplier: 2.0
+  grid_step: 1.00
+  max_grid_levels: 4
+  recovery_mode: HEDGE          # HEDGE | AVERAGE
+  take_profit_usd: 5.0
+  auto_take_profit: true        # TP otomatis dipasang di tiap posisi/pending BARBAR
+  per_position_tp: 0.0          # 0 = hitung dari take_profit_usd dan lot; >0 = jarak harga tetap
+  per_position_sl: 0.0          # 0 = off, pakai basket/equity stop
+  trailing_stop: true           # SL otomatis ikut trend saat posisi sudah profit
+  trailing_start: 0.50          # mulai trailing setelah profit harga >= $0.50
+  trailing_distance: 0.50       # BUY: SL=bid-0.50, SELL: SL=ask+0.50
+  trailing_step: 0.10           # modify SL hanya bila membaik minimal $0.10
+  breakeven_plus: 0.10          # kunci profit minimal $0.10 dari entry
+  trailing_lock_profit_only: true  # jangan pasang trailing SL yang masih rugi
+  profit_lock_percent: 1.0      # basket profit >= 1% balance -> paksa proteksi SL
+  quick_profit_lock: 0.10       # posisi profit kecil $0.10 saja -> pasang SL profit
+  trailing_when_loss: true      # saat masih loss/flat, tetap pasang trailing SL sisi rugi
+  candle_follow: true           # SL & TP ikut struktur candle M1 selama trend searah posisi
+  candle_follow_sl_buffer: 0.10 # BUY: SL=low-0.10, SELL: SL=high+0.10 dari candle terakhir
+  candle_follow_tp_distance: 5.0 # jarak TP tetap di depan harga: 50 pips = $5.00 (pip emas 0.1). 0 = jarak TP otomatis
+  stop_and_reverse: true        # SELL->pasang BUY STOP, BUY->SELL STOP di level SL candle; sekali sentuh = exit + balik arah
+  stop_reverse_lot_mode: BASE   # BASE = pakai base_lot | MATCH = ikut volume posisi yang ditutup | FIXED = pakai stop_reverse_lot
+  stop_reverse_lot: 0.0         # lot tetap order reverse (hanya dipakai saat mode FIXED)
+  magic_number: 20260629
+  max_total_lots: 0.20
+  equity_stop_percent: 20.0
+  max_basket_loss_usd: 50.0
+  max_spread: 0.40
+  one_position_per_bar: true
+  trade_hours_utc: ""           # contoh: "00:05-21:55,23:05-23:55"
+  cooldown_after_stop: 300
+  cancel_opposite_pending: false
+  deviation: 50
+
+# StraddleM1 EA: straddle candle sebelumnya (High[1]/Low[1]) + trailing + stop-and-reverse.
+# 1 posisi, TANPA TP/averaging/martingale. Jarak dalam POINT (XAUUSD 2-digit: 1 point = 0.01).
+# Aktifkan runtime via Telegram: /straddle on.
+straddle_m1:
+  enabled: false
+  timeframe: M1
+  lot: 0.01
+  magic_number: 770017
+  deviation: 30               # deviasi maks (points)
+  max_spread_pts: 30          # 0 = off; spread maks (points) untuk entry baru
+  offset_pts: 30              # BUY STOP = High[1]+0.30, SELL STOP = Low[1]-0.30
+  sl_pts: 50                  # SL tiap leg = 0.50 dari entry (tanpa TP)
+  trail_dist_pts: 20          # SL menempel 0.20 di belakang harga saat trailing
+  trail_step_pts: 20          # update SL/reverse hanya bila berubah >= 0.20 (throttle)
+  rev_gap_pts: 20             # order reverse 0.20 dari SL posisi (ikut bergerak)
+  reverse_timeout_bars: 0     # 0 = simpan reverse sampai fill; >0 = batalkan setelah N bar M1
+  use_time_filter: false      # filter jam WAKTU SERVER untuk blok entry baru
+  block_start_hour: 15        # mulai blok (inklusif)
+  block_end_hour: 17          # selesai blok (eksklusif); tangani wrap-around
+  max_trades_per_day: 0       # 0 = off; rem jumlah straddle baru per hari
+  max_daily_loss: 0.0         # 0 = off; rem realized loss harian (mata uang akun)
 
 loop:
   loop_sleep_sec: 3          # jeda loop utama

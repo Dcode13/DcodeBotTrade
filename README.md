@@ -1,12 +1,102 @@
-# Bot Trading Otomatis BTCUSD (MT5 + Telegram)
+# Bot Trading Otomatis XAUUSD (acuan LBMA + CRT) — MT5 + Telegram
 
-Bot scalping **multi-timeframe** (M15 → M5 → M1) untuk **MetaTrader 5**, fokus
-satu simbol **BTCUSD**, dikontrol & dipantau via **Telegram**, dengan pengaman
+Bot trading **emas (XAUUSD)** untuk **MetaTrader 5**, memakai **harga benchmark
+LBMA Gold (AM & PM)** sebagai acuan fundamental level entry, dikonfirmasi oleh
+**analisis teknikal CRT** (MSS H1 → Golden Zone → OB/FVG → CHoCH M15, port dari
+EA *GridScalper_CRT*). Dikontrol & dipantau via **Telegram**, dengan pengaman
 (circuit breaker + gerbang eksekusi) yang tertanam dan **tidak bisa di-bypass**.
 
-> Default mode = **ALERT-ONLY** (aman): bot menghitung & mengirim sinyal lengkap
-> ke Telegram **tanpa** mengirim order. Eksekusi uang asli butuh dua langkah
-> sengaja: `EXECUTE=true` di `.env` **DAN** `/confirm_live` di Telegram.
+> **Mode strategi** (`strategy_mode` di `config.yaml`):
+> - `combo` (**default, emas**) — entry **momentum (strategi cent)** EMA/swing/RSI
+>   (M15→M5→M1) sebagai generator utama, **tanpa wajib LBMA**; ditambah jalur LBMA
+>   touch & CRT/Fibonacci. **LBMA & Fibonacci jadi acuan/konteks**, bukan syarat entry.
+> - `lbma` — hanya jalur LBMA touch + CRT/Fibonacci (butuh data LBMA).
+> - `legacy` — strategi scalping EMA/swing/RSI murni (tanpa LBMA/CRT/Fib).
+
+> Default mode eksekusi = **ALERT-ONLY** (aman): bot menghitung & mengirim sinyal
+> lengkap ke Telegram **tanpa** mengirim order. Eksekusi uang asli butuh dua
+> langkah sengaja: `EXECUTE=true` di `.env` **DAN** `/confirm_live` di Telegram.
+
+## 📌 Strategi LBMA (mode `lbma`)
+
+Acuan = harga **LBMA Gold** (USD/oz) dari feed JSON resmi LBMA, riwayat **6 bulan**
+di-cache ke `data/lbma_history.json` (refresh otomatis saat start & `/confirm_live`).
+
+**Pemilihan level acuan harian:**
+- LBMA **AM > PM** → level acuan = **PM**.
+- LBMA **PM > AM** → level acuan = **AM** (SL **50 pips**).
+
+**Arah entry (fade ke level):**
+- Harga XAUUSD terkini **di bawah** level → tunggu harga **naik** menyentuh level → **SELL**.
+- Harga XAUUSD terkini **di atas** level → tunggu harga **turun** menyentuh level → **BUY**.
+
+**Filter konsolidasi:** bila harga-harga LBMA pada **2 hari sebelumnya berdekatan
+(rentang ≤ ~300 pips / $30)** → pasar dianggap konsolidasi → **tidak entry**.
+
+**Konfirmasi CRT:** arah entry dicek terhadap bias H1 (MSS) & CHoCH M15. Default
+hanya **dilaporkan** di alert (`crt.require_confirmation=false`); set `true` agar
+sinyal yang berlawanan arah CRT diblokir.
+
+## 📊 Analisis fundamental-teknikal LBMA (spreadsheet "HARGA LBMA HARIAN")
+
+Lapisan **konteks tambahan** dari pola fixing harian LBMA — port dari spreadsheet
+analisis user. **AM = pembukaan sesi London, PM = penutupan sesi London.** Modul
+`core/lbma_fundamental.py` menurunkan (lihat `/lbma_fund` atau `/fund`):
+
+- **Metrik harian:** `DELTA` (PM−AM), `%` (DELTA/PM, skala spreadsheet), `STATUS`
+  (NAIK bila PM>AM, TURUN bila PM<AM), `RASIO` (PM/AM×100), dan **grid akumulasi**
+  (AM − 150/300/400) sebagai zona average-down.
+- **Fibonacci AM & PM** (retracement high→low) dari jendela `fib_window_days` hari
+  (default 22 hari berjalan ≈ 1 bulan; sesuaikan agar pas month-to-date sumber).
+- **BIAS multi-hari** sesuai tabel interpretasi:
+
+  | Kondisi | Interpretasi |
+  |---|---|
+  | PM > AM ≥ `bullish_streak_days` hari | bias bullish jangka pendek |
+  | …dan PM terus *higher-high* | akumulasi / buying lebih kuat |
+  | …tapi PM gagal *higher-high* | waspada **distribusi terselubung** |
+  | PM < AM ≥ `bearish_streak_days` hari | tekanan jual sesi London |
+
+Default **`lbma_fund.require_confirmation=false`** → bias ini hanya **konteks**:
+tampil di alert (`[fund] ...`) & `/status`, **tidak memblok entry**. Set `true`
+agar sinyal yang berlawanan arah bias fundamental dibuang. Atur di
+`config.yaml` blok `lbma_fund`.
+
+### Jalur entry (mode `combo`, default)
+Semua jalur tunduk gerbang yang sama (circuit breaker, filter berita, spread).
+Dicek berurutan; sinyal pertama yang valid dieksekusi. Maksimum tetap **1 posisi**.
+
+0. **Support/Resistance M5/M15/H1 (PRIORITAS) — entry di M5.** Deteksi zona S/R dari
+   swing tiap TF, gabung yang berdekatan (confluence). Harga di **support** + candle
+   M5 **bullish** → BUY; di **resistance** + candle M5 **bearish** → SELL. Lihat
+   `/sr`. Toggle: `sr.enabled`.
+1. **MTF alignment / momentum (strategi cent) — tanpa perlu LBMA.** EMA bias (M15) → zona
+   swing (M5) → momentum candle + RSI (M1). Sama seperti yang dipakai di akun cent.
+   SL/TP berbasis ATR M1 (`config.strategy`).
+2. **LBMA touch (fade).** Entry saat harga menyentuh level acuan LBMA (aturan di
+   atas). Toggle: `lbma.enable_touch_entry`. Hanya jalur ini yang dipengaruhi
+   filter konsolidasi LBMA 2-hari.
+3. **CRT + Fibonacci ("market bagus").** Harga retrace ke **golden zone Fibonacci
+   (0.5–0.786)** searah bias CRT + **CHoCH M15** konfirmasi → entry searah tren.
+   Toggle: `crt.enable_trend_entry` + `fib.enabled`.
+
+Pada jalur momentum, **LBMA & Fibonacci hanya ditempel sebagai acuan** di alert
+(`[acuan] ...`), tidak menghalangi entry. Level Fibonacci kapan saja via `/fib`.
+
+### Auto-set marker LBMA saat `/confirm_live`
+Saat kamu kirim `/confirm_live`, bot otomatis refresh LBMA lalu **men-set marker
+AM LBMA & PM LBMA** (ditampilkan di balasan + tersimpan, juga muncul di `/status`).
+
+> **Satuan "pip" emas**: default 1 pip = `0.1` (= $0.10). Jadi SL 50 pips = **$5.0**
+> dan ambang konsolidasi 300 pips = **$30.0**. Ubah `lbma.pip_size` bila konvensi
+> brokermu berbeda.
+
+> ⚠️ **Catatan risiko modal kecil ($16, akun STP):** lot minimum emas (0.01 ≈
+> $1 per pergerakan $1) dengan SL $5 berarti risiko ~$5 (≈31% equity) per trade.
+> Itu jauh di atas target risk %. Bot akan **SKIP** kecuali
+> `risk.allow_min_lot_override=true` (default ON di config emas) — pahami bahwa ini
+> memaksa entry dengan risiko di atas target. Pertimbangkan menambah modal atau
+> memperkecil `lbma.sl_pips`.
 
 ---
 
@@ -64,14 +154,15 @@ Isi field berikut:
 
 | Variabel | Keterangan |
 |---|---|
-| `MT5_LOGIN` | nomor login akun MT5 |
-| `MT5_PASSWORD` | password akun |
-| `MT5_SERVER` | nama server broker (mis. `JunoMarkets-Live`) |
 | `MT5_PATH` | (opsional) path `terminal64.exe`; kosongkan jika MT5 sudah jalan |
 | `TELEGRAM_BOT_TOKEN` | token dari @BotFather |
 | `OWNER_CHAT_ID` | chat ID kamu (bot hanya merespons ID ini) |
 | `NEWS_API_KEY` | (opsional) untuk kalender berita |
 | `EXECUTE` | `false` = alert-only (default), `true` = izinkan eksekusi |
+
+> **Login akun MT5 lewat Telegram.** Nomor login, password, dan server **tidak**
+> lagi diisi di `.env`. Bot selalu mulai TANPA akun — kirim `/login` di Telegram
+> lalu masukkan nomor login → password → server. `/logout` untuk keluar akun.
 
 > Mendapatkan `OWNER_CHAT_ID`: kirim pesan ke bot, lalu buka
 > `https://api.telegram.org/bot<TOKEN>/getUpdates` dan lihat `chat.id`.
@@ -87,9 +178,18 @@ python main.py
 Opsi: `python main.py --config path\config.yaml --env path\.env`
 
 Saat start, bot akan:
-1. Connect MT5 → discovery simbol BTCUSD → log nama & spesifikasi kontrak.
-2. Reconcile posisi (sinkron dengan posisi nyata).
-3. Masuk loop, mengirim **heartbeat** & alert ke Telegram.
+1. Mulai **TANPA akun** (tidak auto-login) → kirim pesan sambutan & minta `/login`.
+2. Daftarkan menu perintah ke Telegram (muncul saat ketik `/`).
+3. Masuk loop, melayani perintah Telegram.
+
+Setelah `/login` (nomor login → password → server) berhasil, bot connect MT5 →
+discovery simbol XAUUSD → reconcile posisi → mulai kirim **heartbeat** & alert.
+Mode `lbma`: data acuan LBMA 6 bulan di-refresh & di-cache `data/lbma_history.json`.
+
+### Ekspor LBMA ke Excel (opsional, terpisah dari bot)
+```powershell
+python lbma_gold_scraper.py --months 6 --output lbma_gold_6bulan.xlsx --csv
+```
 
 Hentikan dengan `Ctrl+C` (atau `/stop` di Telegram untuk kill switch eksekusi).
 
@@ -99,8 +199,14 @@ Hentikan dengan `Ctrl+C` (atau `/stop` di Telegram untuk kill switch eksekusi).
 
 | Perintah | Fungsi |
 |---|---|
-| `/start`, `/help` | daftar perintah |
-| `/status` | mode (LIVE/ALERT-ONLY), bias, equity, DD harian, loss beruntun, trade harian, paused |
+| `/start`, `/help` | sambutan & daftar perintah |
+| `/login` | masuk akun MT5 (nomor login → password → server) |
+| `/logout` | keluar akun MT5 yang sedang login |
+| `/lbma` | acuan LBMA hari ini (AM/PM + level + status) & riwayat 10 hari + ringkasan bulanan. `/lbma YYYY-MM-DD` (per hari) atau `/lbma YYYY-MM` (per bulan) |
+| `/lbma_fund` (`/fund`) | **analisis fundamental-teknikal LBMA**: bias multi-hari PM vs AM, metrik harian (DELTA/STATUS/RASIO), grid akumulasi, level Fibonacci AM & PM |
+| `/fib` | level Fibonacci terkini (leg, golden zone, retracement & extension, posisi harga) |
+| `/sr` | peta Support/Resistance M5/M15/H1 (level, TF confluence, kekuatan) |
+| `/status` | mode (LIVE/ALERT-ONLY), acuan LBMA + marker AM/PM + bias CRT, equity, DD harian, loss beruntun, trade harian, paused |
 | `/positions` | posisi terbuka (entry, SL, TP, floating P/L) |
 | `/balance` | balance & equity (penjelasan satuan cent) |
 | `/risk` | parameter risiko aktif |
@@ -183,6 +289,7 @@ Sebelum live, verifikasi ini terhadap broker/akun kamu:
 | `max_daily_loss_pct` | 0.05 | DD harian ≥ 5% → stop entry sampai hari berganti |
 | `max_consecutive_losses` | 3 | loss beruntun → auto-pause, butuh `/resume` |
 | `max_open_positions` | 1 | tanpa stacking/averaging |
+| `entries_per_signal` | 1 | jumlah posisi dibuka **sekaligus** per sinyal (mis. `2`). Risiko dibagi rata antar entry; di akun mikro yang sudah lot-minimum, eksposur jadi ~n× target. |
 | `max_trades_per_day` | 8 | batas overtrading |
 | `max_spread_points` | 250 | **verifikasi vs broker** |
 | `allow_min_lot_override` | false | true = boleh entry walau lot min > target |
@@ -191,10 +298,13 @@ Sebelum live, verifikasi ini terhadap broker/akun kamu:
 ### `management`
 | Param | Default | Arti |
 |---|---|---|
-| `break_even` | true | geser SL ke entry setelah profit `break_even_trigger_r` |
-| `break_even_trigger_r` | 1.0 | trigger break-even pada R ini |
-| `trailing_stop` | false | trailing berbasis ATR(M1) |
-| `trailing_atr_mult` | 1.5 | jarak trailing (× ATR M1) bila aktif |
+| `break_even` | true | aktifkan auto-SL ke profit |
+| `break_even_trigger_r` | 0.8 | saat profit ≥ R ini → SL dipindah ke profit |
+| `breakeven_plus_pips` | 10 | **SL PLUS**: kunci profit sekian pips saat trigger (0 = breakeven murni) |
+| `trailing_stop` | true | SL otomatis ikut harga (ATR) → profit terkunci makin besar |
+| `trailing_atr_mult` | 1.5 | jarak trailing (× ATR entry TF) |
+| `auto_tp` | true | TP otomatis (RR) selalu dipasang saat order |
+| `entry_tp_rrs` | `[1.0, 1.5]` | RR (TP) per entry saat `entries_per_signal > 1`. Entry-1 TP rapat (cepat WIN), entry-2 lebih jauh. Kurang dari jumlah entry → entry sisa pakai nilai terakhir. |
 
 ### `fundamentals`
 | Param | Default | Arti |
@@ -222,9 +332,13 @@ Sebelum live, verifikasi ini terhadap broker/akun kamu:
 ├── core/
 │   ├── config.py             # loader yaml + env -> dataclass
 │   ├── mt5_client.py         # connect, reconnect, symbol discovery
-│   ├── market_data.py        # tarik candle M15/M5/M1
+│   ├── market_data.py        # tarik candle (H1/M15/M5 atau M15/M5/M1)
 │   ├── indicators.py         # EMA, ATR, RSI (pure)
-│   ├── strategy.py           # sinyal multi-timeframe (pure)
+│   ├── lbma.py               # data LBMA AM/PM (cache 6 bln) + logika entry (pure)
+│   ├── lbma_fundamental.py   # analisis fundamental LBMA: bias PM vs AM, fib AM/PM, grid (pure)
+│   ├── crt_analysis.py       # port CRT: MSS/GoldenZone/OB-FVG/CHoCH (pure)
+│   ├── fibonacci.py          # leg swing + retracement/extension + golden zone (pure)
+│   ├── strategy.py           # sinyal multi-timeframe legacy (pure)
 │   ├── risk_manager.py       # sizing, circuit breaker, validasi (pure)
 │   ├── fundamentals.py       # filter berita/sentimen
 │   ├── executor.py           # kirim/modify/close order
@@ -234,7 +348,8 @@ Sebelum live, verifikasi ini terhadap broker/akun kamu:
 │   ├── bot.py                # polling perintah + auth
 │   └── notifier.py           # alert real-time
 ├── backtest/backtester.py    # uji historis (terpisah dari live)
-├── tests/                    # unit test (sizing, swing, trigger, breaker, dst.)
+├── tests/                    # unit test (sizing, swing, trigger, breaker, LBMA, dst.)
+├── lbma_gold_scraper.py      # CLI ekspor LBMA AM/PM ke Excel/CSV (mandiri)
 ├── main.py                   # orchestrator / loop utama
 ├── requirements.txt
 ├── .env.example

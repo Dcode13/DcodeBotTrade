@@ -16,7 +16,7 @@ from typing import Literal
 import pandas as pd
 
 from core import indicators
-from core.config import StrategyConfig
+from core.config import MTFConfig, StrategyConfig
 
 Direction = Literal["BUY", "SELL"]
 Bias = Literal["UP", "DOWN", "NONE"]
@@ -312,4 +312,71 @@ def evaluate(
     if signal is None:
         return None, "Gagal menghitung SL/TP (ATR/jarak tidak valid)"
 
+    return signal, signal.reason
+
+
+# --------------------------------------------------------------------------- #
+# Entry alignment multi-timeframe (H1 + M15 + M5 searah + momentum M1)
+# --------------------------------------------------------------------------- #
+def evaluate_mtf(
+    df_h1: pd.DataFrame,
+    df_m15: pd.DataFrame,
+    df_m5: pd.DataFrame,
+    df_m1: pd.DataFrame,
+    cfg: StrategyConfig,
+    mtf: MTFConfig,
+    bid: float | None = None,
+    ask: float | None = None,
+) -> tuple[Signal | None, str]:
+    """Entry tren bila bias H1/M15/M5 sepakat + ada momentum candle M1.
+
+    TIDAK butuh LBMA & TIDAK menunggu harga ke zona swing. SL/TP berbasis
+    ekstrem candle M1 + ATR M1 (lewat ``build_signal``).
+    """
+    bias_h1 = compute_bias(df_h1, cfg)
+    bias_m15 = compute_bias(df_m15, cfg)
+    bias_m5 = compute_bias(df_m5, cfg)
+    biases = [bias_h1, bias_m15, bias_m5]
+    tag = f"H1={bias_h1} M15={bias_m15} M5={bias_m5}"
+    mode = (mtf.mode or "majority").lower()
+
+    bias: Bias
+    if mode == "h1":
+        if bias_h1 == "NONE":
+            return None, f"MTF(h1) bias H1 NONE ({tag})"
+        bias = bias_h1
+    elif mode == "all":
+        if all(b == "UP" for b in biases):
+            bias = "UP"
+        elif all(b == "DOWN" for b in biases):
+            bias = "DOWN"
+        else:
+            return None, f"MTF belum align ({tag})"
+    else:  # majority
+        ups = biases.count("UP")
+        downs = biases.count("DOWN")
+        if ups >= 2 and bias_h1 != "DOWN":
+            bias = "UP"
+        elif downs >= 2 and bias_h1 != "UP":
+            bias = "DOWN"
+        else:
+            return None, f"MTF belum align ({tag})"
+
+    trigger = evaluate_trigger(df_m1, bias, cfg)
+    if not trigger.is_signal:
+        return None, f"MTF align {bias} ({tag}) tapi M1 belum momentum: {trigger.reason}"
+
+    if len(df_m1) < 3:
+        return None, "MTF: data M1 kurang"
+    bar = df_m1.iloc[-2]
+    zone = float(bar["low"]) if bias == "UP" else float(bar["high"])
+    if bias == "UP":
+        ref_price = ask if ask is not None else float(df_m1["close"].iloc[-2])
+    else:
+        ref_price = bid if bid is not None else float(df_m1["close"].iloc[-2])
+
+    signal = build_signal(df_m1, bias, zone, ref_price, cfg, trigger)
+    if signal is None:
+        return None, "MTF: gagal hitung SL/TP"
+    signal.reason = f"MTF align {bias} (H1/M15/M5) + momentum M1"
     return signal, signal.reason

@@ -14,6 +14,7 @@ Fail-safe: jika API gagal/timeout -> perilaku sesuai ``fail_mode``
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -40,6 +41,8 @@ class FundamentalsFilter:
     def __init__(self, cfg: FundamentalsConfig, news_api_key: str = "") -> None:
         self.cfg = cfg
         self.news_api_key = news_api_key
+        # Cache kalender: (monotonic_expiry, events_json). Hindari fetch tiap loop.
+        self._cal_cache: tuple[float, object] | None = None
 
     # ------------------------------------------------------------------ #
     def _fail(self, what: str) -> FundamentalDecision:
@@ -64,20 +67,24 @@ class FundamentalsFilter:
             return FundamentalDecision(True, "kalender nonaktif")
 
         now = now or _now_utc()
-        try:
-            params = {}
-            if self.news_api_key:
-                params["apikey"] = self.news_api_key
-            resp = requests.get(
-                self.cfg.calendar_url,
-                params=params or None,
-                timeout=self.cfg.http_timeout_sec,
-            )
-            resp.raise_for_status()
-            events = resp.json()
-        except (requests.RequestException, ValueError) as exc:
-            log.warning("Kalender error: %s", exc)
-            return self._fail("kalender")
+        events = self._cached_events()
+        if events is None:
+            try:
+                params = {}
+                if self.news_api_key:
+                    params["apikey"] = self.news_api_key
+                resp = requests.get(
+                    self.cfg.calendar_url,
+                    params=params or None,
+                    timeout=self.cfg.http_timeout_sec,
+                )
+                resp.raise_for_status()
+                events = resp.json()
+            except (requests.RequestException, ValueError) as exc:
+                log.warning("Kalender error: %s", exc)
+                return self._fail("kalender")
+            ttl = max(1, self.cfg.calendar_cache_minutes) * 60.0
+            self._cal_cache = (time.monotonic() + ttl, events)
 
         window = self.cfg.no_trade_window_minutes
         try:
@@ -95,6 +102,12 @@ class FundamentalsFilter:
             return self._fail("kalender(parse)")
 
         return FundamentalDecision(True, "tidak ada event high-impact dekat")
+
+    def _cached_events(self) -> object | None:
+        """Kembalikan events dari cache bila masih segar, else None (perlu fetch)."""
+        if self._cal_cache is not None and time.monotonic() < self._cal_cache[0]:
+            return self._cal_cache[1]
+        return None
 
     @staticmethod
     def _iter_high_impact_usd(events: object):

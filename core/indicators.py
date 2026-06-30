@@ -56,3 +56,40 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     rsi_val = rsi_val.where(avg_loss != 0.0, 100.0)
     rsi_val = rsi_val.where(avg_gain != 0.0, 0.0)
     return rsi_val
+
+
+def adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+    """Average Directional Index (Wilder) + komponen +DI/-DI.
+
+    ADX mengukur KEKUATAN tren (bukan arah). Konvensi trader:
+    ADX < ~20 = pasar sideways/ranging; ADX >= ~25 = tren kuat.
+    +DI > -DI = tekanan beli dominan; sebaliknya tekanan jual.
+
+    Mengembalikan DataFrame dengan kolom ``adx``, ``plus_di``, ``minus_di``
+    sepanjang input (nilai awal NaN). Memakai smoothing Wilder (ewm alpha=1/period)
+    konsisten dengan ``atr``/``rsi``.
+    """
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0.0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0.0), 0.0)
+
+    tr = true_range(df)
+    alpha = 1.0 / period
+    atr_w = tr.ewm(alpha=alpha, adjust=False).mean()
+
+    plus_di = 100.0 * plus_dm.ewm(alpha=alpha, adjust=False).mean() / atr_w.replace(0.0, np.nan)
+    minus_di = 100.0 * minus_dm.ewm(alpha=alpha, adjust=False).mean() / atr_w.replace(0.0, np.nan)
+
+    di_sum = (plus_di + minus_di).replace(0.0, np.nan)
+    dx = 100.0 * (plus_di - minus_di).abs() / di_sum
+    adx_val = dx.ewm(alpha=alpha, adjust=False).mean()
+
+    return pd.DataFrame(
+        {"adx": adx_val, "plus_di": plus_di, "minus_di": minus_di},
+        index=df.index,
+    )

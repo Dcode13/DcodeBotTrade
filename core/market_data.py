@@ -22,7 +22,11 @@ def _timeframe_map() -> dict[str, int]:
     m = _require_mt5()
     return {
         "M1": m.TIMEFRAME_M1,
+        "M2": m.TIMEFRAME_M2,
+        "M3": m.TIMEFRAME_M3,
+        "M4": m.TIMEFRAME_M4,
         "M5": m.TIMEFRAME_M5,
+        "M10": m.TIMEFRAME_M10,
         "M15": m.TIMEFRAME_M15,
         "M30": m.TIMEFRAME_M30,
         "H1": m.TIMEFRAME_H1,

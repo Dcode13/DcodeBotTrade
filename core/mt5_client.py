@@ -12,7 +12,9 @@ tetap bisa di-test tanpa terminal.
 
 from __future__ import annotations
 
+import glob
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -49,35 +51,142 @@ class MT5Client:
         self.symbol_pattern = symbol_pattern
         self.symbol: str | None = None
         self._connected = False
+        self._last_error: Any = None
+        self.login_timeout_ms = 60000  # tunggu koneksi server broker (ms)
+
+    # ------------------------------------------------------------------ #
+    def last_error_str(self) -> str:
+        """Error MT5 terakhir (kode + deskripsi) untuk ditampilkan ke user."""
+        if not self._last_error:
+            return "tidak ada detail (cek apakah terminal MT5 berjalan)"
+        try:
+            code, desc = self._last_error
+            return f"[{code}] {desc}"
+        except (TypeError, ValueError):
+            return str(self._last_error)
 
     # ------------------------------------------------------------------ #
     def connect(self) -> bool:
-        """Inisialisasi & login ke terminal. True jika sukses."""
+        """Hubungkan MT5 & login akun. True jika sukses.
+
+        Login ke broker APA PUN (real/demo) hanya dengan nomor login, password,
+        & server — TANPA set path manual. Bila kredensial diberikan (via /login),
+        bot mencoba: terminal yang sedang berjalan, lalu SEMUA terminal MT5 yang
+        terpasang di PC (auto-discovery), sampai ada yang menerima login (server
+        broker tsb dikenal oleh terminal itu).
+        """
         m = _require_mt5()
-        kwargs: dict[str, Any] = {}
+        self._last_error = None
+
+        if not self.secrets.mt5_login:
+            return self._init_only(m)
+
+        # Kandidat terminal: path eksplisit (opsional) -> terminal berjalan ->
+        # semua terminal MT5 terpasang.
+        candidates: list[str | None] = []
         if self.secrets.mt5_path:
-            kwargs["path"] = self.secrets.mt5_path
-        if self.secrets.mt5_login:
-            kwargs["login"] = self.secrets.mt5_login
-            kwargs["password"] = self.secrets.mt5_password
-            kwargs["server"] = self.secrets.mt5_server
+            candidates.append(self.secrets.mt5_path)
+        candidates.append(None)
+        for p in self.discover_terminal_paths():
+            if p not in candidates:
+                candidates.append(p)
 
-        if not m.initialize(**kwargs):
-            log.error("mt5.initialize() gagal: %s", m.last_error())
+        last_err: Any = None
+        for cand in candidates:
+            if self._try_login(m, cand):
+                if cand:
+                    # Ingat terminal yang berhasil untuk reconnect berikutnya.
+                    self.secrets.mt5_path = cand
+                return True
+            last_err = self._last_error
+            try:
+                m.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+        self._last_error = last_err
+        log.error("Login gagal di semua terminal (%d kandidat). Error: %s",
+                  len(candidates), self.last_error_str())
+        return False
+
+    def _try_login(self, m: Any, path: str | None) -> bool:
+        """Coba initialize(path) + login akun. True bila akun aktif."""
+        init_kwargs: dict[str, Any] = {"timeout": self.login_timeout_ms}
+        if path:
+            init_kwargs["path"] = path
+        if not m.initialize(**init_kwargs):
+            self._last_error = m.last_error()
+            log.info("initialize(%s) gagal: %s", path or "default", self._last_error)
             return False
-
+        authorized = m.login(
+            int(self.secrets.mt5_login),
+            password=self.secrets.mt5_password,
+            server=self.secrets.mt5_server,
+            timeout=self.login_timeout_ms,
+        )
+        if not authorized:
+            self._last_error = m.last_error()
+            log.info("login(server=%s) via %s gagal: %s",
+                     self.secrets.mt5_server, path or "default", self._last_error)
+            return False
         info = m.account_info()
         if info is None:
-            log.error("account_info() None setelah initialize: %s", m.last_error())
+            self._last_error = m.last_error()
+            return False
+        self._connected = True
+        log.info("MT5 terhubung via %s. Akun=%s server=%s currency=%s",
+                 path or "(terminal berjalan)", info.login, info.server, info.currency)
+        return True
+
+    def _init_only(self, m: Any) -> bool:
+        """Attach terminal tanpa login eksplisit (mode belum punya akun)."""
+        init_kwargs: dict[str, Any] = {"timeout": self.login_timeout_ms}
+        if self.secrets.mt5_path:
+            init_kwargs["path"] = self.secrets.mt5_path
+        if not m.initialize(**init_kwargs):
+            self._last_error = m.last_error()
+            log.error("mt5.initialize() gagal: %s", self._last_error)
+            return False
+        info = m.account_info()
+        if info is None:
+            self._last_error = m.last_error()
             m.shutdown()
             return False
-
         self._connected = True
-        log.info(
-            "MT5 terhubung. Akun=%s server=%s currency=%s",
-            info.login, info.server, info.currency,
-        )
+        log.info("MT5 terhubung (tanpa login eksplisit). Akun=%s server=%s",
+                 info.login, info.server)
         return True
+
+    @staticmethod
+    def discover_terminal_paths() -> list[str]:
+        """Cari semua terminal64.exe MT5 yang terpasang di PC (Windows).
+
+        Memindai Program Files, Program Files (x86), LocalAppData, dan folder
+        data MetaQuotes. Dipakai agar login bisa ke broker mana pun tanpa
+        menyebut path secara manual (cukup satu terminal generic terpasang).
+        """
+        bases = [
+            os.environ.get("ProgramFiles", r"C:\Program Files"),
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            os.environ.get("LOCALAPPDATA", ""),
+        ]
+        patterns: list[str] = []
+        for base in bases:
+            if not base:
+                continue
+            patterns.append(os.path.join(base, "*", "terminal64.exe"))
+            patterns.append(os.path.join(base, "*", "*", "terminal64.exe"))
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            patterns.append(os.path.join(
+                appdata, "MetaQuotes", "Terminal", "*", "terminal64.exe"))
+        found: list[str] = []
+        seen: set[str] = set()
+        for pat in patterns:
+            for path in glob.glob(pat):
+                if path not in seen:
+                    seen.add(path)
+                    found.append(path)
+        return found
 
     def is_connected(self) -> bool:
         if mt5 is None or not self._connected:
@@ -106,10 +215,15 @@ class MT5Client:
         return False
 
     def shutdown(self) -> None:
-        if mt5 is not None and self._connected:
-            mt5.shutdown()
-            self._connected = False
-            log.info("MT5 shutdown.")
+        was_connected = self._connected
+        self._connected = False
+        if mt5 is not None:
+            try:
+                mt5.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+            if was_connected:
+                log.info("MT5 shutdown.")
 
     # ------------------------------------------------------------------ #
     # Discovery simbol (§5.3)

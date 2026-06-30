@@ -49,6 +49,7 @@ class PositionManager:
         mgmt: ManagementConfig,
         strat: StrategyConfig,
         magic: int,
+        pip_size: float = 0.1,
     ) -> None:
         self.client = client
         self.executor = executor
@@ -56,6 +57,7 @@ class PositionManager:
         self.mgmt = mgmt
         self.strat = strat
         self.magic = magic
+        self.pip_size = pip_size
         self._known_tickets: set[int] = set()
 
     # ------------------------------------------------------------------ #
@@ -148,13 +150,21 @@ class PositionManager:
         new_sl: float | None = None
         action = ""
 
-        # Break-even.
+        # Break-even + SL PLUS: kunci profit beberapa pips saat profit >= trigger R.
         if self.mgmt.break_even and r_now >= self.mgmt.break_even_trigger_r:
-            be_price = entry
+            plus = self.mgmt.breakeven_plus_pips * self.pip_size
+            be_price = (entry + plus) if is_buy else (entry - plus)
+            # Jangan taruh SL di sisi salah dari harga sekarang (broker menolak) ->
+            # fallback ke breakeven murni bila plus terlalu besar.
+            if is_buy and be_price >= current:
+                be_price = entry
+            elif (not is_buy) and be_price <= current:
+                be_price = entry
+            label = "SL-plus" if self.mgmt.breakeven_plus_pips > 0 and be_price != entry else "break-even"
             if is_buy and position.sl < be_price:
-                new_sl, action = be_price, "break-even"
+                new_sl, action = be_price, label
             elif (not is_buy) and (position.sl == 0 or position.sl > be_price):
-                new_sl, action = be_price, "break-even"
+                new_sl, action = be_price, label
 
         # Trailing (menimpa BE bila lebih jauh ke arah profit).
         if self.mgmt.trailing_stop and atr_m1 and atr_m1 > 0 and r_now >= self.mgmt.break_even_trigger_r:
@@ -169,8 +179,14 @@ class PositionManager:
             return None
 
         new_sl = round(new_sl, spec.digits)
+        # PENTING: pertahankan TP yang sudah ada. Pada TRADE_ACTION_SLTP, TP yang
+        # TIDAK disertakan dianggap 0 oleh MT5 -> TP terhapus. Jadi saat SL-plus/
+        # break-even/trailing dipasang, kita kirim ulang TP posisi agar TP TETAP ADA.
+        keep_tp = float(position.tp) if getattr(position, "tp", 0) else None
+        if keep_tp is None and tr and tr.get("tp"):
+            keep_tp = float(tr["tp"])
         res = self.executor.modify_sl_tp(
-            position.ticket, spec.name, new_sl, None, spec.digits
+            position.ticket, spec.name, new_sl, keep_tp, spec.digits
         )
         if res.ok:
             self.journal.update_sl(position.ticket, new_sl)
